@@ -390,8 +390,26 @@ def _sparkline(arr):
     return "".join(ticks[int((v - mn) / span * (len(ticks) - 1))] for v in arr)
 
 def extract_text_from_pdf(path: str) -> str:
+    """Return concatenated text from a PDF, trying multiple extraction methods."""
     doc = fitz.open(path)
-    return "\n".join(page.get_text() for page in doc)
+    chunks = []
+    for page in doc:
+        txt = page.get_text("text")  # fastest
+        if not txt.strip():
+            # Some PDFs render better with the dict API
+            try:
+                dict_blocks = page.get_text("dict")["blocks"]
+                for block in dict_blocks:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            for span in line["spans"]:
+                                if span.get("text"):
+                                    chunks.append(span["text"])
+            except Exception:
+                pass
+        else:
+            chunks.append(txt)
+    return "\n".join(chunks)
 
 
 # Extract text from various file types (PDF, DOCX, PPTX, XLSX)
@@ -479,28 +497,25 @@ def summarize_project_with_gpt(full_text: str) -> Dict[str, Any]:
     Falls back missing keys to "Unknown".
     """
     # Truncate to fit context window
-    text = full_text[:15000]
+    text = full_text[:25000]  # increased context window
 
-    # Allowed options for fields
-    allowed_sectors = ", ".join(SECTOR_OPTIONS)
-    allowed_maturity = ", ".join(MATURITY_STAGES)
-    allowed_countries = ", ".join(COUNTRY_OPTIONS)
-    allowed_regions = ", ".join(REGION_COLORS.keys())
-    allowed_instruments = ", ".join(INSTRUMENT_OPTIONS)
-    allowed_sdgs = ", ".join(SDG_OPTIONS)
+    # Build a bullet‑point style system prompt for better adherence
+    schema_keys = ", ".join([f'"{k}"' for k in AI_FIELDS])
     system_prompt = (
-        "You are an expert impact investment analyst. "
-        "Extract the following fields from the pitch content and return only a valid JSON object with these keys (no extra text): "
-        + ", ".join(AI_FIELDS)
-        + ". "
-        "For fields with predefined options, select only from the allowed lists. "
-        "Specific Sector(s) must be one or more of: " + allowed_sectors + ". "
-        "Region of operation must be one of: " + allowed_regions + ". "
-        "Main country of current operations must be one of: " + allowed_countries + ". "
-        "Maturity stage must be one of: " + allowed_maturity + ". "
-        "Instrument must be one of: " + allowed_instruments + ". "
-        "3 main SDGs targeted must be up to 3 selected from: " + allowed_sdgs + ". "
-        "If the pitch does not mention relevant information for any field, leave that field empty (empty string or empty list)."
+        "You are an expert impact‑investment analyst.\n"
+        "Return **exactly** the following JSON schema, keys in this order and never omit any key "
+        f"({schema_keys}). If a value is missing, use an empty string \"\" or empty list [].\n"
+        "Guidelines:\n"
+        "• Use the **closest match** from each allowed list (case‑insensitive). For example, \"Convertible Note\" should map to \"Convertible note\".\n"
+        "• The allowed lists are:\n"
+        f"  – Specific Sector(s): {', '.join(SECTOR_OPTIONS)}\n"
+        f"  – Region of operation: {', '.join(REGION_COLORS.keys())}\n"
+        f"  – Main country of current operations: {', '.join(COUNTRY_OPTIONS)}\n"
+        f"  – Maturity stage: {', '.join(MATURITY_STAGES)}\n"
+        f"  – Instrument: {', '.join(INSTRUMENT_OPTIONS)}\n"
+        f"  – Main SDGs targeted: {', '.join(SDG_OPTIONS)}\n"
+        "• If the pitch does not mention relevant information for a field, leave it empty.\n"
+        "Output **only** the JSON (no commentary)."
     )
     user_prompt = f"Pitch Content:\n{text}"
 
@@ -515,6 +530,9 @@ def summarize_project_with_gpt(full_text: str) -> Dict[str, Any]:
             max_tokens=2000,
         )
         raw_output = resp.choices[0].message.content.strip()
+        # Store raw output so it can be shown elsewhere in the UI
+        st.session_state["last_raw_output"] = raw_output
+        st.session_state["last_raw_output"] = raw_output
         if DEBUG_GPT:
             print("\n===== GPT RAW OUTPUT =====")
             print(raw_output)
@@ -528,9 +546,10 @@ def summarize_project_with_gpt(full_text: str) -> Dict[str, Any]:
         st.error(f"OpenAI API error: {e}")
         summary = {}
 
-    # Ensure every expected field exists
-    for key in AI_FIELDS:
-        summary.setdefault(key, "Unknown")
+    # Ensure every expected field exists (skip when debugging to see true payload)
+    if not DEBUG_GPT:
+        for key in AI_FIELDS:
+            summary.setdefault(key, "Unknown")
 
     return summary
 
@@ -2355,6 +2374,12 @@ This NDA is governed by Swiss law. Any dispute shall be subject to the exclusive
         st.title("🎉 Submission Complete")
         st.write("Thank you for the update!")
         st.subheader("Your submitted details:")
+        # Show the JSON that GPT just returned
+        with st.expander("🔍 GPT raw output", expanded=False):
+            st.code(
+                st.session_state.get("last_raw_output", "No GPT output captured"),
+                language="json"
+            )
         # Show both original inputs and final AI-edited summary
         combined = {**st.session_state.form_meta, **st.session_state.submitted_details}
         for k, v in combined.items():
